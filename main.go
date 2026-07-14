@@ -25,10 +25,11 @@ type apiConfig struct {
 }
 
 type User struct {
-	ID			uuid.UUID 	`json:"id"`
-	CreatedAt	time.Time 	`json:"created_at"`
-	UpdatedAt	time.Time 	`json:"updated_at"`
-	Email		string	  	`json:"email"`
+	ID				uuid.UUID 	`json:"id"`
+	CreatedAt		time.Time 	`json:"created_at"`
+	UpdatedAt		time.Time 	`json:"updated_at"`
+	Email			string	  	`json:"email"`
+	HashedPassword	string		`json:"-"`
 }
 
 type Chirp struct {
@@ -181,8 +182,8 @@ func main() {
 
 	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request){
 		type parameters struct {
-			Body 	string `json:"body"`
-			UserID 	uuid.UUID `json:"user_id"` 
+			Body 	string 		`json:"body"`
+			UserID 	uuid.UUID 	`json:"user_id"` 
 		}
 
 		decoder := json.NewDecoder(r.Body)
@@ -235,7 +236,8 @@ func main() {
 
 	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request){
 		type parameters struct {
-			Email string `json:"email"`
+			Password 	string `json:"password"`
+			Email 		string `json:"email"`
 		}
 
 		decoder := json.NewDecoder(r.Body)
@@ -246,19 +248,70 @@ func main() {
 			return
 		}
 
-		dbUser, err := apiCfg.db.CreateUser(r.Context(), params.Email)
+		hPassword, err := auth.HashPassword(params.Password)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Hashing password failed")
+			return
+		}
+		dbUser, err := apiCfg.db.CreateUser(r.Context(), database.CreateUserParams{
+			Email: 			params.Email,
+			HashedPassword:	hPassword,
+		})
 		if err != nil {
 			respondWithError(w, 500, "Error creating database user")
 			return
 		}
 
 		newUser := User{
+			ID: 			dbUser.ID,
+			CreatedAt: 		dbUser.CreatedAt,
+			UpdatedAt:		dbUser.UpdatedAt,
+			Email:			dbUser.Email,
+		}
+		respondWithJSON(w, http.StatusCreated, newUser)
+	})
+
+	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request){
+		type parameters struct {
+			Password 	string `json:"password"`
+			Email 		string `json:"email"`
+		}
+		
+		decoder := json.NewDecoder(r.Body)
+		params := parameters{}
+		err := decoder.Decode(&params)
+		if err != nil {
+			respondWithError(w, 400, "Something went wrong")
+			return
+		}
+
+		loginErrMsg := "Incorrect email or password"
+
+		dbUser, err := apiCfg.db.SearchUserByEmail(r.Context(), params.Email)
+		if err != nil {
+			respondWithError(w, http.StatusUnauthorized, loginErrMsg)
+			return
+		}
+
+		ok, err := auth.CheckPasswordHash(params.Password, dbUser.HashedPassword)
+		if err != nil {
+			respondWithError(w, http.StatusUnauthorized, loginErrMsg)
+			return
+		}
+
+		loginUser := User{
 			ID: 		dbUser.ID,
-			CreatedAt: 	dbUser.CreatedAt,
+			CreatedAt:	dbUser.CreatedAt,
 			UpdatedAt:	dbUser.UpdatedAt,
 			Email:		dbUser.Email,
 		}
-		respondWithJSON(w, http.StatusCreated, newUser)
+
+		if !ok {
+			respondWithError(w, http.StatusUnauthorized, loginErrMsg)
+			return
+		}
+		respondWithJSON(w, http.StatusOK, loginUser)
+		return
 	})
 
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
